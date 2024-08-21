@@ -1,16 +1,15 @@
 import openai
 import streamlit as st
 import speech_recognition as sr
-import pyttsx3
+from gtts import gTTS
+import os
 import tempfile
 
 # Set up OpenAI API key
 openai.api_key = st.secrets["OPEN_AI_API"]
 
-# Initialize the recognizer and text-to-speech engine
+# Initialize the recognizer
 recognizer = sr.Recognizer()
-tts_engine = pyttsx3.init()
-
 
 # Define a function to handle the context and chat
 class ChatSystem:
@@ -35,9 +34,8 @@ class ChatSystem:
                 response = self.ask_gpt(text)
                 st.write(f"ChatGPT says: {response}")
 
-                # Convert response text to speech
-                tts_engine.say(response)
-                tts_engine.runAndWait()
+                # Convert response text to speech using gTTS
+                self.speak_text(response)
 
             except Exception as e:
                 st.write(f"Error: {e}")
@@ -54,6 +52,10 @@ class ChatSystem:
         )
         return response.choices[0].text.strip()
 
+    def speak_text(self, text):
+        tts = gTTS(text=text, lang='en')
+        tts.save("output.mp3")
+        os.system("afplay output.mp3")  # On macOS, use 'afplay'; on Windows, use 'start output.mp3'
 
 # Initialize the chat system
 chat_system = ChatSystem()
@@ -81,4 +83,3 @@ if st.button("Set Context"):
 # Button to activate speech recognition
 if st.button("Activate Speech Recognition"):
     chat_system.listen_and_respond()
-
