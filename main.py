@@ -1,36 +1,19 @@
 import openai
 import streamlit as st
-import speech_recognition as sr
-from gtts import gTTS
-import os
+import sounddevice as sd
+import numpy as np
 import tempfile
+from scipy.io.wavfile import write
+from scipy.io import wavfile
+import os
+from gtts import gTTS
 
 # Set up OpenAI API key
 openai.api_key = st.secrets["OPEN_AI_API"]
 
-# Initialize the recognizer
-recognizer = sr.Recognizer()
-
-# List all available microphones
-mic_list = sr.Microphone.list_microphone_names()
-
 # Streamlit UI setup
 st.title("Speech-Enabled Chat with GPT")
 st.write("Upload your resume and provide some context to start the chat.")
-
-# Display available input devices
-st.write("Select the input device (microphone):")
-selected_mic = st.selectbox("Choose a microphone or virtual device", mic_list)
-
-# Function to get the selected microphone's device index
-def get_device_index(mic_name):
-    for index, name in enumerate(mic_list):
-        if name == mic_name:
-            return index
-    return None
-
-# Get the selected microphone's device index
-device_index = get_device_index(selected_mic)
 
 # Upload resume file
 uploaded_file = st.file_uploader("Upload your resume (optional)", type=["pdf", "docx", "txt"])
@@ -43,6 +26,7 @@ if uploaded_file:
         temp_file_path = temp_file.name
     context += f"\nResume uploaded: {uploaded_file.name}"
 
+
 # Define a function to handle the context and chat
 class ChatSystem:
     def __init__(self):
@@ -51,26 +35,39 @@ class ChatSystem:
     def set_context(self, context):
         self.context = context
 
-    def listen_and_respond(self, device_index):
-        # Use the selected microphone or virtual device as the audio source
-        with sr.Microphone(device_index=device_index) as source:
-            st.write("Listening for speech...")
-            audio = recognizer.listen(source)
+    def record_audio(self, duration=5, fs=44100):
+        """Record audio from the microphone."""
+        st.write("Recording...")
+        recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
+        sd.wait()  # Wait until recording is finished
+        st.write("Recording finished")
 
-            try:
-                # Convert speech to text
-                text = recognizer.recognize_google(audio)
-                st.write(f"You said: {text}")
+        # Save recording to a temporary WAV file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_wav_file:
+            write(temp_wav_file.name, fs, recording)
+            temp_wav_file_path = temp_wav_file.name
 
-                # Send the text to OpenAI API if it's a question
-                response = self.ask_gpt(text)
-                st.write(f"ChatGPT says: {response}")
+        return temp_wav_file_path
 
-                # Convert response text to speech using gTTS
-                self.speak_text(response)
+    def listen_and_respond(self, duration=5):
+        """Record audio, transcribe it, and generate a response using GPT."""
+        audio_file_path = self.record_audio(duration=duration)
 
-            except Exception as e:
-                st.write(f"Error: {e}")
+        # Read the audio file
+        fs, audio = wavfile.read(audio_file_path)
+
+        # Here you would typically use a speech recognition model to convert the audio to text
+        # For the sake of this example, let's assume we have the transcribed text
+        text = "Simulated transcribed text from the recorded audio"
+
+        st.write(f"You said: {text}")
+
+        # Send the text to OpenAI API if it's a question
+        response = self.ask_gpt(text)
+        st.write(f"ChatGPT says: {response}")
+
+        # Convert response text to speech using gTTS
+        self.speak_text(response)
 
     def ask_gpt(self, query):
         # Combine the context with the query
@@ -86,12 +83,16 @@ class ChatSystem:
 
     def speak_text(self, text):
         tts = gTTS(text=text, lang='en')
-        tts.save("output.mp3")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_mp3_file:
+            tts.save(temp_mp3_file.name)
+            temp_mp3_file_path = temp_mp3_file.name
+
         # Use 'afplay' on macOS, 'start' on Windows
         if os.name == 'posix':  # macOS/Linux
-            os.system("afplay output.mp3")
+            os.system(f"afplay {temp_mp3_file_path}")
         elif os.name == 'nt':  # Windows
-            os.system("start output.mp3")
+            os.system(f"start {temp_mp3_file_path}")
+
 
 # Initialize the chat system
 chat_system = ChatSystem()
@@ -103,4 +104,4 @@ if st.button("Set Context"):
 
 # Button to activate speech recognition
 if st.button("Activate Speech Recognition"):
-    chat_system.listen_and_respond(device_index)
+    chat_system.listen_and_respond()
