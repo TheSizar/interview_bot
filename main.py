@@ -1,21 +1,27 @@
-import openai
+
 import streamlit as st
 import sounddevice as sd
-from scipy.io.wavfile import write
+import queue
 import tempfile
 from gtts import gTTS
 import os
+import sys  # Import sys module
 from openai import OpenAI
+from google.cloud import speech
 
+# Set up OpenAI API key
 os.environ['OPENAI_API_KEY'] = st.secrets["OPEN_AI_API"]
 client = OpenAI()
+
+# Set up Google Cloud credentials
+os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = st.secrets["GOOGLE_CLOUD_API_KEY"]
 
 # List available audio devices
 device_list = sd.query_devices()
 device_names = [device['name'] for device in device_list]
 
 # Streamlit UI setup
-st.title("Speech-Enabled Chat with GPT")
+st.title("Real-Time Speech-Enabled Chat with GPT")
 st.write("Upload your resume and provide some context to start the chat.")
 
 # Select the audio input device (built-in microphone, Loopback virtual device, etc.)
@@ -35,7 +41,12 @@ if uploaded_file:
         temp_file_path = temp_file.name
     context_input += f"\nResume uploaded: {uploaded_file.name}"
 
+# Audio queue to communicate with the callback
+audio_queue = queue.Queue()
+
 # Define a function to handle the context and chat
+
+
 class ChatSystem:
     def __init__(self):
         self.context = ""
@@ -45,42 +56,55 @@ class ChatSystem:
         self.context = new_context
         self.chat_history.append({"role": "system", "content": self.context})
 
-    @staticmethod
-    def record_audio(duration=5, fs=44100):
-        """Record audio from the selected microphone."""
-        st.write("Recording...")
-        recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16', device=input_device_index)
-        sd.wait()  # Wait until recording is finished
-        st.write("Recording finished")
+    @staticmethod  # Declare as static since 'self' is not used
+    def audio_callback(indata, status):
+        """Callback function to stream audio data to the Google API."""
+        if status:
+            st.write(status, file=sys.stderr)
+        audio_queue.put(bytes(indata))
 
-        # Save recording to a temporary WAV file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_wav_file:
-            write(temp_wav_file.name, fs, recording)
-            temp_wav_file_path = temp_wav_file.name
+    def listen_and_transcribe(self):
+        """Capture and transcribe audio in real-time."""
+        client = speech.SpeechClient()
 
-        return temp_wav_file_path
+        # ure the Google Speech API stream
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=44100,
+            language_code="en-US",
+        )
+        streaming_config = speech.StreamingRecognitionConfig(
+            config=config,
+            interim_results=True  # Allows partial (real-time) transcription
+        )
 
-    def listen_and_respond(self, duration=5):
-        """Record audio, transcribe it, and generate a response using GPT."""
-        audio_file_path = self.record_audio(duration=duration)
+        # Start streaming the audio input
+        with sd.InputStream(samplerate=44100, channels=1, callback=self.audio_callback, device=input_device_index):
+            audio_generator = self.audio_stream_generator()
+            requests = (speech.StreamingRecognizeRequest(audio_content=content) for content in audio_generator)
+            responses = client.streaming_recognize(streaming_config, requests)
 
-        # Simulate transcribing text from the audio (placeholder)
-        # In a real implementation, you would use a speech-to-text service here
-        transcribed_text = "Simulated transcribed text from the recorded audio"
+            # Process the responses as they come in
+            for response in responses:
+                for result in response.results:
+                    if result.is_final:
+                        transcribed_text = result.alternatives[0].transcript
+                        st.write(f"You said: {transcribed_text}")
+                        self.chat_history.append({"role": "user", "content": transcribed_text})
 
-        st.write(f"You said: {transcribed_text}")
-        self.chat_history.append({"role": "user", "content": transcribed_text})
+                        # Get GPT response and output
+                        response_text = self.ask_gpt(transcribed_text)
+                        st.write(f"ChatGPT says: {response_text}")
+                        self.chat_history.append({"role": "assistant", "content": response_text})
+                        self.speak_text(response_text)
 
-        # Send the text to OpenAI API
-        response = self.ask_gpt(transcribed_text)
-        st.write(f"ChatGPT says: {response}")
-        self.chat_history.append({"role": "assistant", "content": response})
-
-        # Convert response text to speech using gTTS
-        self.speak_text(response)
-
-        # You can delete the audio file after processing, if you don't need it anymore
-        os.remove(audio_file_path)
+    def audio_stream_generator(self):
+        """Generator to yield audio data to Google API."""
+        while True:
+            data = audio_queue.get()
+            if data is None:
+                break
+            yield data
 
     def ask_gpt(self, query):
         # Use the correct method to call the OpenAI API
@@ -90,7 +114,6 @@ class ChatSystem:
             max_tokens=300,  # Adjust response length
             temperature=0.3  # Adjust creativity (0.0 - precise, 1.0 - creative)
         )
-
         return response.choices[0].message.content.strip()
 
     @staticmethod
@@ -120,5 +143,5 @@ for message in chat_system.chat_history:
     st.write(f"{message['role'].capitalize()}: {message['content']}")
 
 # Button to activate speech recognition
-if st.button("Activate Speech Recognition"):
-    chat_system.listen_and_respond()
+if st.button("Activate Real-Time Speech Recognition"):
+    chat_system.listen_and_transcribe()
