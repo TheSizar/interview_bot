@@ -5,7 +5,6 @@ import sounddevice as sd
 import numpy as np
 import queue
 import tempfile
-import streamlit as st
 import json
 import os
 import toml
@@ -19,12 +18,12 @@ from tkinter import ttk
 from ttkthemes import ThemedTk
 from threading import Lock  # Import Lock for thread safety
 
-# Load secrets from the .streamlit/secrets.toml
+# Load secrets from the secrets.toml
 with open('../secrets.toml', 'r') as f:
     secrets = toml.load(f)
 
 # Set up OpenAI API key
-os.environ['OPENAI_API_KEY'] = st.secrets["OPEN_AI_API"]
+os.environ['OPENAI_API_KEY'] = secrets["OPEN_AI_API"]
 
 client_openai = OpenAI()
 
