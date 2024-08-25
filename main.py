@@ -66,7 +66,6 @@ class ChatSystem:
     def listen_and_transcribe(self):
         """Capture and transcribe audio in real-time."""
         client = speech.SpeechClient()
-
         # ure the Google Speech API stream
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
