@@ -1,4 +1,3 @@
-
 import streamlit as st
 import sounddevice as sd
 import queue
@@ -11,7 +10,7 @@ from google.cloud import speech
 
 # Set up OpenAI API key
 os.environ['OPENAI_API_KEY'] = st.secrets["OPEN_AI_API"]
-client = OpenAI()
+client_openai = OpenAI()
 
 # Set up Google Cloud credentials
 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = st.secrets["GOOGLE_CLOUD_API_KEY"]
@@ -45,8 +44,6 @@ if uploaded_file:
 audio_queue = queue.Queue()
 
 # Define a function to handle the context and chat
-
-
 class ChatSystem:
     def __init__(self):
         self.context = ""
@@ -56,8 +53,8 @@ class ChatSystem:
         self.context = new_context
         self.chat_history.append({"role": "system", "content": self.context})
 
-    @staticmethod  # Declare as static since 'self' is not used
-    def audio_callback(indata, status):
+    @staticmethod
+    def audio_callback(indata, frames, time, status):
         """Callback function to stream audio data to the Google API."""
         if status:
             st.write(status, file=sys.stderr)
@@ -65,8 +62,9 @@ class ChatSystem:
 
     def listen_and_transcribe(self):
         """Capture and transcribe audio in real-time."""
-        client = speech.SpeechClient()
-        # ure the Google Speech API stream
+        client_speech = speech.SpeechClient()
+
+        # Configure the Google Speech API stream
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=44100,
@@ -77,18 +75,27 @@ class ChatSystem:
             interim_results=True  # Allows partial (real-time) transcription
         )
 
-        # Start streaming the audio input
-        with sd.InputStream(samplerate=44100, channels=1, callback=self.audio_callback, device=input_device_index):
+        # Start streaming the audio input with explicit latency and block size settings
+        with sd.InputStream(
+            samplerate=44100,
+            channels=1,
+            callback=self.audio_callback,
+            device=input_device_index,
+            latency='low',  # Set latency to low for minimal delay
+            blocksize=1024  # Set a reasonable block size; adjust as needed
+        ):
             audio_generator = self.audio_stream_generator()
             requests = (speech.StreamingRecognizeRequest(audio_content=content) for content in audio_generator)
-            responses = client.streaming_recognize(streaming_config, requests)
+            responses = client_speech.streaming_recognize(streaming_config, requests)
 
             # Process the responses as they come in
             for response in responses:
                 for result in response.results:
+                    transcribed_text = result.alternatives[0].transcript
+                    st.write(f"You said: {transcribed_text}")  # Print live transcription
+
+                    # If the result is final, add it to the chat history and generate a response
                     if result.is_final:
-                        transcribed_text = result.alternatives[0].transcript
-                        st.write(f"You said: {transcribed_text}")
                         self.chat_history.append({"role": "user", "content": transcribed_text})
 
                         # Get GPT response and output
@@ -107,7 +114,7 @@ class ChatSystem:
 
     def ask_gpt(self, query):
         # Use the correct method to call the OpenAI API
-        response = client.chat.completions.create(
+        response = client_openai.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=self.chat_history,
             max_tokens=300,  # Adjust response length
