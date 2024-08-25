@@ -1,5 +1,4 @@
 import queue
-
 import numpy as np
 import sounddevice as sd
 from google.cloud import speech

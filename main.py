@@ -10,8 +10,7 @@ import json
 import requests
 import toml
 from google.cloud import speech
-
-
+from openai import OpenAI
 
 # Load secrets from .streamlit/secrets.toml
 with open('.streamlit/secrets.toml', 'r') as f:
@@ -29,6 +28,7 @@ os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_file_path
 
 # Set up OpenAI API key
 os.environ['OPENAI_API_KEY'] = st.secrets["OPEN_AI_API"]
+client_openai = OpenAI()
 
 def check_network():
     try:
