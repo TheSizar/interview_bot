@@ -5,7 +5,7 @@ import os
 from google.cloud import speech
 
 # Load secrets from .streamlit/secrets.toml
-with open('.streamlit/secrets.toml', 'r') as f:
+with open('../../secrets.toml', 'r') as f:
     secrets = toml.load(f)
 
 # Create a temporary file with the Google Cloud credentials

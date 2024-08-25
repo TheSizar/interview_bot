@@ -20,7 +20,7 @@ from ttkthemes import ThemedTk
 from threading import Lock  # Import Lock for thread safety
 
 # Load secrets from the .streamlit/secrets.toml
-with open('.streamlit/secrets.toml', 'r') as f:
+with open('../secrets.toml', 'r') as f:
     secrets = toml.load(f)
 
 # Set up OpenAI API key

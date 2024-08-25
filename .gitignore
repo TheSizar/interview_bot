@@ -12,6 +12,4 @@ __pycache__/
 .idea/
 .vscode/
 .DS_Store
-
-# Ignore Streamlit secrets
-.streamlit/secrets.toml
+secrets.toml
