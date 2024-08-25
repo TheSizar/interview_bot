@@ -7,6 +7,7 @@ __pycache__/
 
 # Ignore environment files
 .env
+myenv/
 
 # Ignore other unnecessary files
 .idea/
