@@ -13,7 +13,6 @@ interview_bot/
 │   │   ├── test_api.py
 │   │   ├── test_audio_format.py
 │   │   └── test_google_api.py
-│   ├── main.py
 │   └── speech_chat_gpt_question.py
 ├── .gitignore
 ├── README.md
