@@ -19,6 +19,12 @@ from tkinter import ttk
 from ttkthemes import ThemedTk
 from datetime import datetime
 
+# Get the directory of the current script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Construct the path to secrets.toml
+secrets_path = os.path.join(script_dir, '..', 'secrets.toml')
+
 # Load secrets from the secrets.toml
 try:
     with open(secrets_path, 'r') as f:
@@ -267,7 +273,7 @@ class SpeechApp:
 
         self.transcript_display.tag_configure("user", foreground="white",
                                               background="#0056b3" if self.dark_mode else "#007AFF")
-        self.transcript_display.tag_configure("assistant", foreground="white" if self.dark_mode else "black",
+        self.transcript_display.tag_configure("assistant", foreground="black",
                                               background="#4a4a4a" if self.dark_mode else "#E5E5EA")
         self.transcript_display.tag_configure("timestamp", foreground="#b0b0b0" if self.dark_mode else "gray")
 
@@ -299,7 +305,7 @@ class SpeechApp:
         # Reconfigure chat message tags
         self.transcript_display.tag_configure("user", foreground="white",
                                               background="#0056b3" if self.dark_mode else "#007AFF")
-        self.transcript_display.tag_configure("assistant", foreground="white" if self.dark_mode else "black",
+        self.transcript_display.tag_configure("assistant", foreground="black",
                                               background="#4a4a4a" if self.dark_mode else "#E5E5EA")
         self.transcript_display.tag_configure("timestamp", foreground="#b0b0b0" if self.dark_mode else "gray")
 
