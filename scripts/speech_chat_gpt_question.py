@@ -16,7 +16,6 @@ import docx
 import PyPDF2
 from tkinter import ttk
 from ttkthemes import ThemedTk
-from threading import Lock  # Import Lock for thread safety
 
 # Load secrets from the secrets.toml
 with open('../secrets.toml', 'r') as f:
