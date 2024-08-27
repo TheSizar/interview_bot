@@ -18,6 +18,9 @@ import PyPDF2
 from tkinter import ttk
 from ttkthemes import ThemedTk
 from datetime import datetime
+import time
+import requests
+from requests.exceptions import RequestException
 
 # Get the directory of the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -537,6 +540,7 @@ class SpeechApp:
 
     def ask_gpt(self, query):
         max_retries = 3
+        backoff_factor = 0.5
 
         for attempt in range(max_retries):
             try:
@@ -565,23 +569,17 @@ class SpeechApp:
                 self.chat_history.append({"role": "assistant", "content": response_text})
                 return response_text
 
-            except openai.error.APIError as api_error:
-                    if attempt < max_retries - 1:
-                        continue  # Retry the request
-                    else:
-                        messagebox.showerror("Error", f"OpenAI API error: {str(api_error)}")
-                        return "Sorry, I'm currently unable to generate a response."
-            except openai.error.RateLimitError as rate_error:
-                    messagebox.showerror("Error", f"OpenAI API rate limit reached: {str(rate_error)}")
-                    return "Sorry, the request rate has been exceeded. Please try again later."
-
+            except (openai.error.APIError, openai.error.ServiceUnavailableError, RequestException) as e:
+                if attempt == max_retries - 1:
+                    print(f"Error in GPT response after {max_retries} attempts: {e}")
+                    return "I'm sorry, but I'm having trouble connecting right now. Please try again in a moment."
+                time.sleep(backoff_factor * (2 ** attempt))  # Exponential backoff
+            except openai.error.RateLimitError:
+                print("Rate limit exceeded. Please wait before trying again.")
+                return "I'm sorry, but I've reached my query limit. Please wait a moment before asking another question."
             except Exception as e:
-                    if attempt < max_retries - 1:
-                        continue  # Retry the request
-                    else:
-                        messagebox.showerror("Error",
-                                             f"Error in GPT response: Failed to connect. Probable cause: {str(e)}")
-                        return "Sorry, I couldn't generate a response at this time."
+                print(f"Unexpected error: {e}")
+                return "An unexpected error occurred. Please try again."
 
     def display_message(self, sender, message, tag):
         timestamp = datetime.now().strftime("%H:%M:%S")
