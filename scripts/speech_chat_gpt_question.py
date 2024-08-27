@@ -19,12 +19,6 @@ from tkinter import ttk
 from ttkthemes import ThemedTk
 from datetime import datetime
 
-# Get the directory of the current script
-script_dir = os.path.dirname(os.path.abspath(__file__))
-
-# Construct the path to secrets.toml
-secrets_path = os.path.join(script_dir, '..', 'secrets.toml')
-
 # Load secrets from the secrets.toml
 try:
     with open(secrets_path, 'r') as f:
