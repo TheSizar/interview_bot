@@ -6,6 +6,7 @@ import numpy as np
 import queue
 import tempfile
 import json
+import re
 import os
 import toml
 from gtts import gTTS
@@ -16,10 +17,22 @@ import docx
 import PyPDF2
 from tkinter import ttk
 from ttkthemes import ThemedTk
+from datetime import datetime
+
+# Get the directory of the current script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Construct the path to secrets.toml
+secrets_path = os.path.join(script_dir, '..', 'secrets.toml')
 
 # Load secrets from the secrets.toml
-with open('../secrets.toml', 'r') as f:
-    secrets = toml.load(f)
+try:
+    with open(secrets_path, 'r') as f:
+        secrets = toml.load(f)
+except FileNotFoundError:
+    print(f"Error: secrets.toml not found at {secrets_path}")
+    print("Please ensure the secrets.toml file exists in the correct location.")
+    exit(1)
 
 # Set up OpenAI API key
 os.environ['OPENAI_API_KEY'] = secrets["OPEN_AI_API"]
@@ -43,14 +56,15 @@ class AudioLevelMeter(tk.Canvas):
     def __init__(self, master, device_index, **kwargs):
         super().__init__(master, **kwargs)
         self.device_index = device_index
-        self.levels = [0] * 20  # Initial levels
+        self.levels = [0] * 20
+        self.configure(bg="#2E2E2E")  # Set a dark background for the meter
         self.create_rectangles()
         self.update_meter()
 
     def create_rectangles(self):
         self.bars = []
         for i in range(20):
-            bar = self.create_rectangle(i * 15 + 5, 20, i * 15 + 15, 80, fill="gray")
+            bar = self.create_rectangle(i * 15 + 5, 20, i * 15 + 15, 80, fill="gray", outline="")
             self.bars.append(bar)
 
     def update_meter(self):
@@ -85,43 +99,62 @@ class SpeechApp:
         self.root.geometry("1000x800")
         self.is_waiting_for_response = False
         self.is_speaking = False
+        self.dark_mode = False
+        self.volume = 1.0
+
+        # Initialize style
+        self.style = ttk.Style(self.root)
+        self.style.theme_use('arc')
 
         self.context = ""
         self.chat_history = [{"role": "system", "content": "Context not set."}]
         self.stop_signal = False
         self.uploaded_files = []
-        self.lock = threading.Lock()  # Initialize the lock for thread safety
+        self.lock = threading.Lock()
 
-        # Initialize the list of input devices
+        # Initialize device list and names
         self.device_list = sd.query_devices()
         self.device_names = [device['name'] for device in self.device_list]
 
-        # GUI Components
         self.setup_gui()
+        self.apply_theme()
 
     def setup_gui(self):
-        # Configure the root window
-        self.root.configure(bg='white')
+        self.style = ttk.Style()
+        self.style.theme_use('arc')
 
-        # Top frame (API Test & Mic Check)
-        top_frame = ttk.Frame(self.root, padding="10")
+        # Main frame
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Top frame (API Test, Mic Check, Dark Mode Toggle)
+        top_frame = ttk.Frame(main_frame, padding="5")
         top_frame.pack(fill=tk.X)
 
-        self.test_api_button = ttk.Button(top_frame, text="Test Google & OpenAI APIs", command=self.test_apis)
-        self.test_api_button.pack(side=tk.LEFT, padx=10)
-
         self.device_var = tk.StringVar(self.root)
-        self.device_var.set(self.device_names[0])  # Default to the first device
-        self.device_menu = ttk.Combobox(top_frame, textvariable=self.device_var, values=self.device_names,
-                                        state="readonly", width=30)
-        self.device_menu.pack(side=tk.LEFT, padx=10)
+        if self.device_names:  # Check if device_names is not empty
+            self.device_var.set(self.device_names[0])
+        else:
+            print("Warning: No audio devices found.")
+            self.device_var.set("No devices available")
 
+        self.device_menu = ttk.Combobox(top_frame, textvariable=self.device_var,
+                                        values=self.device_names, state="readonly", width=30)
+        self.device_menu.pack(side=tk.LEFT, padx=5)
+
+        self.test_api_button = ttk.Button(top_frame, text="Test APIs", command=self.test_apis)
+        self.test_api_button.pack(side=tk.LEFT, padx=5)
+
+        self.dark_mode_button = ttk.Button(top_frame, text="Toggle Dark Mode", command=self.toggle_dark_mode)
+        self.dark_mode_button.pack(side=tk.RIGHT, padx=5)
+
+        # Audio level meter
         self.audio_level_meter = AudioLevelMeter(top_frame, device_index=self.device_names.index(self.device_var.get()),
                                                  width=310, height=100)
-        self.audio_level_meter.pack(side=tk.LEFT, padx=10)
+        self.audio_level_meter.pack(side=tk.LEFT, padx=5)
 
         # Middle frame (Context & File Upload)
-        middle_frame = ttk.Frame(self.root, padding="10")
+        middle_frame = ttk.Frame(main_frame, padding="5")
         middle_frame.pack(fill=tk.BOTH, expand=True)
 
         self.job_label = ttk.Label(middle_frame, text="Job Context:", font=('Arial', 12, 'bold'))
@@ -155,7 +188,7 @@ class SpeechApp:
         )
         self.context_input.insert(tk.END, default_system_message)
 
-        # File Upload (Button and File List on the Same Line)
+        # File Upload
         file_frame = ttk.Frame(middle_frame)
         file_frame.pack(fill=tk.X, padx=5, pady=5)
 
@@ -164,20 +197,26 @@ class SpeechApp:
 
         self.file_list = ttk.Treeview(file_frame, columns=("File",), show="headings", height=2)
         self.file_list.heading("File", text="Uploaded Files")
-        self.file_list.column("File", width=200)  # Adjust column width as needed
+        self.file_list.column("File", width=200)
         self.file_list.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
         # Bottom frame (Chat)
-        bottom_frame = ttk.Frame(self.root, padding="10")
+        bottom_frame = ttk.Frame(main_frame, padding="5")
         bottom_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.start_button = ttk.Button(bottom_frame, text="Start Recording", command=self.start_recording)
+        button_frame = ttk.Frame(bottom_frame)
+        button_frame.pack(fill=tk.X)
+
+        self.start_button = ttk.Button(button_frame, text="Start Recording", command=self.start_recording)
         self.start_button.pack(side=tk.LEFT, padx=5)
 
-        self.stop_button = ttk.Button(bottom_frame, text="Stop Recording", command=self.stop_recording)
+        self.stop_button = ttk.Button(button_frame, text="Stop Recording", command=self.stop_recording)
         self.stop_button.pack(side=tk.LEFT, padx=5)
 
-        self.speaking_indicator = ttk.Label(bottom_frame, text="●", foreground="grey")
+        self.clear_button = ttk.Button(button_frame, text="Clear Chat", command=self.clear_chat)
+        self.clear_button.pack(side=tk.LEFT, padx=5)
+
+        self.speaking_indicator = ttk.Label(button_frame, text="●", foreground="grey")
         self.speaking_indicator.pack(side=tk.LEFT, padx=5)
 
         # Transcript Display (iMessage Style)
@@ -188,9 +227,105 @@ class SpeechApp:
                                               font=('Arial', 12, 'bold'), lmargin1=10, rmargin=10)
         self.transcript_display.tag_configure("assistant", foreground="black", background="#E5E5EA", justify="left",
                                               font=('Arial', 12), lmargin1=10, rmargin=10)
+        self.transcript_display.tag_configure("timestamp", foreground="gray", font=('Arial', 10, 'italic'))
 
-        # Reduce unnecessary idle tasks to improve scrolling performance
+        # Loading indicator
+        self.loading_label = ttk.Label(bottom_frame, text="", font=('Arial', 12, 'italic'))
+        self.loading_label.pack()
+
         self.root.after_idle(self.root.update_idletasks)
+
+        # Set up custom styles for dark mode compatibility
+        self.style.configure("Custom.Treeview", rowheight=25)
+        self.style.configure("Custom.TCombobox", selectbackground='#0078D7', selectforeground='white')
+        self.style.configure("Custom.TButton", padding=5)
+        self.style.configure("Custom.TEntry", fieldbackground="white", foreground="black")
+        self.style.configure("Custom.TCombobox", fieldbackground="white", foreground="black",
+                             selectbackground='#0078D7', selectforeground='white')
+        self.style.configure("Custom.Treeview", fieldbackground="white", background="white", foreground="black")
+        self.style.map('Custom.Treeview', background=[('selected', '#0078D7')], foreground=[('selected', 'white')])
+
+    def apply_theme(self):
+        bg_color = "#2E2E2E" if self.dark_mode else "white"
+        fg_color = "white" if self.dark_mode else "black"
+        button_fg_color = "black"  # Set button text color to black in dark mode
+        entry_bg = "#3E3E3E" if self.dark_mode else "white"
+        entry_fg = "white" if self.dark_mode else "black"
+        entry_border_color = "white"  # Add a white border for the text boxes
+
+        self.root.configure(bg=bg_color)
+        self.style.configure("TFrame", background=bg_color)
+        self.style.configure("TLabel", background=bg_color, foreground=fg_color)
+        self.style.configure("Custom.TButton", background=bg_color, foreground=button_fg_color)
+        self.style.configure("Custom.TEntry", fieldbackground=entry_bg, foreground=entry_fg,
+                             bordercolor=entry_border_color)
+        self.style.configure("Custom.TCombobox", fieldbackground=entry_bg, foreground=entry_fg,
+                             selectbackground='#0078D7', selectforeground='white')
+        self.style.configure("Custom.Treeview", fieldbackground=entry_bg, background=entry_bg, foreground=fg_color)
+        self.style.map('Custom.Treeview', background=[('selected', '#0078D7')], foreground=[('selected', 'white')])
+
+        self.transcript_display.configure(bg=entry_bg, fg=fg_color, insertbackground=fg_color, bd=2, relief="solid",
+                                          highlightbackground=entry_border_color)
+        self.job_input.configure(bg=entry_bg, fg=fg_color, insertbackground=fg_color, bd=2, relief="solid",
+                                 highlightbackground=entry_border_color)
+        self.context_input.configure(bg=entry_bg, fg=fg_color, insertbackground=fg_color, bd=2, relief="solid",
+                                     highlightbackground=entry_border_color)
+
+        self.transcript_display.tag_configure("user", foreground="white",
+                                              background="#0056b3" if self.dark_mode else "#007AFF")
+        self.transcript_display.tag_configure("assistant", foreground="white" if self.dark_mode else "black",
+                                              background="#4a4a4a" if self.dark_mode else "#E5E5EA")
+        self.transcript_display.tag_configure("timestamp", foreground="#b0b0b0" if self.dark_mode else "gray")
+
+        for widget in [self.test_api_button, self.dark_mode_button, self.upload_button,
+                       self.start_button, self.stop_button, self.clear_button]:
+            widget.configure(style="Custom.TButton")
+
+        self.device_menu.configure(style="Custom.TCombobox")
+        self.file_list.configure(style="Custom.Treeview")
+
+
+    def toggle_dark_mode(self):
+        self.dark_mode = not self.dark_mode
+        self.apply_theme()
+        bg_color = "#2E2E2E" if self.dark_mode else "white"
+        fg_color = "white" if self.dark_mode else "black"
+
+        # Configure root and style
+        self.root.configure(bg=bg_color)
+        self.style.configure("TFrame", background=bg_color)
+        self.style.configure("TLabel", background=bg_color, foreground=fg_color)
+        self.style.configure("TButton", background=bg_color, foreground=fg_color)
+
+        # Configure text widgets
+        self.transcript_display.configure(bg=bg_color, fg=fg_color)
+        self.job_input.configure(bg=bg_color, fg=fg_color, insertbackground=fg_color)
+        self.context_input.configure(bg=bg_color, fg=fg_color, insertbackground=fg_color)
+
+        # Reconfigure chat message tags
+        self.transcript_display.tag_configure("user", foreground="white",
+                                              background="#0056b3" if self.dark_mode else "#007AFF")
+        self.transcript_display.tag_configure("assistant", foreground="white" if self.dark_mode else "black",
+                                              background="#4a4a4a" if self.dark_mode else "#E5E5EA")
+        self.transcript_display.tag_configure("timestamp", foreground="#b0b0b0" if self.dark_mode else "gray")
+
+        # Update other widgets
+        self.file_list.configure(style="Custom.Treeview")
+        self.style.configure("Custom.Treeview",
+                             background=bg_color,
+                             fieldbackground=bg_color,
+                             foreground=fg_color)
+        self.style.map('Custom.Treeview', background=[('selected', '#0078D7')])
+
+        self.device_menu.configure(style="Custom.TCombobox")
+        self.style.configure("Custom.TCombobox",
+                             fieldbackground=bg_color,
+                             background=bg_color,
+                             foreground=fg_color)
+
+        # Update loading label
+        self.loading_label.configure(foreground=fg_color)
+
 
     def upload_file(self):
         file_path = filedialog.askopenfilename(
@@ -246,12 +381,33 @@ class SpeechApp:
     def start_recording(self):
         self.stop_signal = False
         self.initial_context = self.prepare_initial_context()
-        self.chat_history = []  # Initialize or clear the chat history for user and assistant messages
+        self.chat_history = []
         threading.Thread(target=self.listen_and_transcribe, daemon=True).start()
+
+
+    def clear_chat(self):
+        self.transcript_display.delete(1.0, tk.END)
+        self.chat_history = [{"role": "system", "content": "Context not set."}]
+    
+    def get_resume_content(self):
+        for file_name, file_path in self.uploaded_files:
+            if "resume" in file_name.lower() or "cv" in file_name.lower():
+                return self.read_file_content(file_path)
+        return ""
+    def is_behavioral_question(self, text):
+        behavioral_patterns = [
+            r"tell me about a time when",
+            r"describe a situation where",
+            r"give me an example of",
+            r"how did you handle",
+            r"what do you do when",
+        ]
+        return any(re.search(pattern, text.lower()) for pattern in behavioral_patterns)
 
     def prepare_initial_context(self):
         context = self.context_input.get("1.0", tk.END).strip()
         job_context = self.job_input.get("1.0", tk.END).strip()
+        self.resume_content = self.get_resume_content()
 
         # Prepare the initial system message with context and job description
         system_message = f"Job Context: {job_context}\nGeneral Context: {context}\n\n"
@@ -262,8 +418,39 @@ class SpeechApp:
             file_content = self.read_file_content(file_path)
             system_message += f"Content: {file_content[:500]}...\n\n"  # Include first 500 characters of each file
 
-        return {"role": "system", "content": system_message}
+        # Emphasize the structure for behavioral questions
+        system_message += (
+            "For behavioral questions, structure your response as follows:\n"
+            "- **Situation**: Describe the situation or challenge.\n"
+            "- **Task**: Explain what needed to be done.\n"
+            "- **Action**: Detail the actions taken.\n"
+            "- **Result**: Highlight the outcomes or achievements."
+        )
 
+        return {"role": "system", "content": system_message}
+    def prepare_behavioral_prompt(self, query):
+        prompt = f"""
+        Behavioral Question: {query}
+
+        Resume Content:
+        {self.resume_content}
+
+        Based on the provided resume and the context of this person's experience, prepare a model answer for the behavioral question. The answer should:
+        1. Be anchored in the specific experiences mentioned in the resume
+        2. Follow the STAR (Situation, Task, Action, Result) format
+        3. Be detailed and specific, using concrete examples from the person's background
+        4. Be approximately 250-300 words long
+
+        Please structure the response as follows:
+        - Situation: [Brief description of the context]
+        - Task: [What needed to be done]
+        - Action: [Steps taken to address the situation]
+        - Result: [Outcome and lessons learned]
+
+        Provide a well-crafted response that showcases the individual's skills and experiences relevant to the question.
+        """
+        return prompt
+    
     def read_file_content(self, file_path):
         if file_path.endswith(".txt"):
             with open(file_path, 'r', encoding='utf-8') as file:
@@ -280,7 +467,7 @@ class SpeechApp:
     def stop_recording(self):
         self.stop_signal = True
         try:
-            audio_queue.put(None)  # Stop the audio generator
+            audio_queue.put(None)
         except Exception as e:
             messagebox.showerror("Error", f"Error stopping recording: {str(e)}")
 
@@ -343,50 +530,75 @@ class SpeechApp:
             messagebox.showerror("Error", f"Error during transcription: {str(e)}")
 
     def is_question(self, text):
-        """Determine if the text is a question."""
+        """Determine if the text is a question or a behavioral query."""
         question_words = ["who", "what", "where", "when", "why", "how", "is", "are", "do", "does", "can", "could",
-                          "would", "should"]
-        return text.strip().endswith("?") or text.split()[0].lower() in question_words
+                          "would", "should", "tell me about"]
+        return text.strip().endswith("?") or text.lower().startswith(tuple(question_words))
 
     def ask_gpt(self, query):
+        max_retries = 3
+
+        for attempt in range(max_retries):
+            try:
+                # Check if it's a behavioral question
+                if self.is_behavioral_question(query):
+                    # Prepare a special prompt for behavioral questions
+                    behavioral_prompt = self.prepare_behavioral_prompt(query)
+                    messages = [
+                        {"role": "system", "content": self.initial_context["content"]},
+                        {"role": "user", "content": behavioral_prompt}
+                    ]
+                else:
+                    # Regular question handling
+                    self.chat_history.append({"role": "user", "content": query})
+                    messages = [self.initial_context] + self.chat_history[-5:]
+
+                response = client_openai.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=messages,
+                    max_tokens=500,  # Increased for more detailed responses
+                    temperature=0.7,
+                    stop=None
+                )
+
+                response_text = response.choices[0].message.content.strip()
+                self.chat_history.append({"role": "assistant", "content": response_text})
+                return response_text
+
+            except openai.error.APIError as api_error:
+                    if attempt < max_retries - 1:
+                        continue  # Retry the request
+                    else:
+                        messagebox.showerror("Error", f"OpenAI API error: {str(api_error)}")
+                        return "Sorry, I'm currently unable to generate a response."
+            except openai.error.RateLimitError as rate_error:
+                    messagebox.showerror("Error", f"OpenAI API rate limit reached: {str(rate_error)}")
+                    return "Sorry, the request rate has been exceeded. Please try again later."
+
+            except Exception as e:
+                    if attempt < max_retries - 1:
+                        continue  # Retry the request
+                    else:
+                        messagebox.showerror("Error",
+                                             f"Error in GPT response: Failed to connect. Probable cause: {str(e)}")
+                        return "Sorry, I couldn't generate a response at this time."
+
+    def display_message(self, sender, message, tag):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.transcript_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
+        self.transcript_display.insert(tk.END, f"{sender}: {message}\n", tag)
+        self.transcript_display.see(tk.END)
+    def process_gpt_response(self, query):
         try:
-            # Add the user's question to the chat history
-            self.chat_history.append({"role": "user", "content": query})
-
-            # Prepare the messages for the API call
-            messages = [self.initial_context]  # Start with the initial context
-
-            # Append the last 5 messages from the chat history
-            messages += self.chat_history[-5:]
-
-            # Call the OpenAI API with the prepared messages
-            response = client_openai.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=messages,  # Include the initial context and the last 5 chat messages
-                max_tokens=300,
-                temperature=0.5,
-                stop=None
-            )
-
-            # Extract the response from GPT
-            response_text = response.choices[0].message.content.strip()
-
-            # Add the assistant's response to the chat history
-            self.chat_history.append({"role": "assistant", "content": response_text})
-
-            return response_text
-
-        except openai.error.APIError as api_error:
-            messagebox.showerror("Error", f"OpenAI API error: {str(api_error)}")
-            return "Sorry, I'm currently unable to generate a response."
-
-        except openai.error.RateLimitError as rate_error:
-            messagebox.showerror("Error", f"OpenAI API rate limit reached: {str(rate_error)}")
-            return "Sorry, the request rate has been exceeded. Please try again later."
-
+            self.loading_label.config(text="Processing...")
+            response_text = self.ask_gpt(query)
+            self.display_message("Assistant", response_text, "assistant")
+            self.speak_text(response_text)
         except Exception as e:
-            messagebox.showerror("Error", f"Error in GPT response: Failed to connect. Probable cause: {str(e)}")
-            return "Sorry, I couldn't generate a response at this time."
+            messagebox.showerror("Error", f"Error in GPT response: {str(e)}")
+        finally:
+            self.is_waiting_for_response = False
+            self.loading_label.config(text="")
 
     def process_gpt_response(self, query):
         try:
@@ -422,7 +634,6 @@ class SpeechApp:
 
         self.is_speaking = False
         self.speaking_indicator.config(foreground="grey")
-
 
 # Run the application
 if __name__ == "__main__":
