@@ -19,10 +19,13 @@ from datetime import datetime
 import time
 import requests
 from requests.exceptions import RequestException
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
+import urllib3
+from urllib3.exceptions import InsecureRequestWarning
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Disable SSL verification warning
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+urllib3.disable_warnings(InsecureRequestWarning)
 
 # Get the directory of the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -465,20 +468,28 @@ class SpeechApp:
 
                 for response in responses:
                     if self.stop_signal:
+                        print("Stop signal received, breaking loop")
                         break
                     for result in response.results:
                         if result.is_final:
                             transcribed_text = result.alternatives[0].transcript
+                            print(f"New transcribed text: {transcribed_text}")
                             self.transcript_display.insert(tk.END, f"You: {transcribed_text}\n", "user")
                             self.transcript_display.see(tk.END)
 
-                            # Only call Groq if we're not already waiting for a response
-                            if self.is_question(transcribed_text) and not self.is_waiting_for_response:
-                                self.is_waiting_for_response = True  # Indicate that we're waiting for a response
-                                threading.Thread(target=self.process_gpt_response, args=(transcribed_text,)).start()
+                            if self.is_question(transcribed_text):
+                                print(f"Question detected: {transcribed_text}")
+                                if not self.is_waiting_for_response:
+                                    print("Starting to process GPT response")
+                                    self.is_waiting_for_response = True
+                                    threading.Thread(target=self.process_gpt_response, args=(transcribed_text,)).start()
+                                else:
+                                    print("Waiting for previous response, skipping question")
 
         except Exception as e:
             messagebox.showerror("Error", f"Error during transcription: {str(e)}")
+
+        print("Exiting listen_and_transcribe")
 
     def is_question(self, text):
         """Determine if the text is a question or a behavioral query."""
@@ -491,11 +502,22 @@ class SpeechApp:
             "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json"
         }
-        response = requests.post(f"https://api.groq.com/openai/v1/{endpoint}", headers=headers, json=data, verify=False)
-        response.raise_for_status()
-        return response.json()
+        
+        # Create a session with retry mechanism
+        session = requests.Session()
+        retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+        session.mount('https://', HTTPAdapter(max_retries=retries))
+        
+        try:
+            response = session.post(f"https://api.groq.com/openai/v1/{endpoint}", headers=headers, json=data, verify=False, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Error in Groq API request: {e}")
+            raise
 
     def ask_groq(self, query):
+        print(f"Asking Groq: {query}")
         max_retries = 3
         backoff_factor = 0.5
 
@@ -521,15 +543,16 @@ class SpeechApp:
                 response_json = self.groq_api_request("chat/completions", data)
                 response_text = response_json['choices'][0]['message']['content'].strip()
                 self.chat_history.append({"role": "assistant", "content": response_text})
+                print(f"Groq response received, length: {len(response_text)}")
                 return response_text
 
             except RequestException as e:
+                print(f"RequestException in ask_groq (attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt == max_retries - 1:
-                    print(f"Error in Groq response after {max_retries} attempts: {e}")
                     return "I'm sorry, but I'm having trouble connecting right now. Please try again in a moment."
                 time.sleep(backoff_factor * (2 ** attempt))  # Exponential backoff
             except Exception as e:
-                print(f"Unexpected error: {e}")
+                print(f"Unexpected error in ask_groq: {e}")
                 return "An unexpected error occurred. Please try again."
 
     def display_message(self, sender, message, tag):
@@ -540,15 +563,21 @@ class SpeechApp:
 
     def process_gpt_response(self, query):
         try:
+            print(f"Processing GPT response for query: {query}")
             self.loading_label.config(text="Processing...")
+            self.root.update_idletasks()
             response_text = self.ask_groq(query)
+            print(f"Received response from Groq: {response_text[:50]}...")  # Print first 50 chars of response
             self.display_message("Assistant", response_text, "assistant")
             self.speak_text(response_text)
         except Exception as e:
+            print(f"Error in Groq response: {str(e)}")
             messagebox.showerror("Error", f"Error in Groq response: {str(e)}")
         finally:
+            print("Resetting is_waiting_for_response flag")
             self.is_waiting_for_response = False
             self.loading_label.config(text="")
+            self.root.update_idletasks()
 
     def speak_text(self, text):
         self.is_speaking = True

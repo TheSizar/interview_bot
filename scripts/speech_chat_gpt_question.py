@@ -19,8 +19,9 @@ from tkinter import ttk
 from ttkthemes import ThemedTk
 from datetime import datetime
 import time
-import requests
 from requests.exceptions import RequestException
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Get the directory of the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -114,6 +115,7 @@ class SpeechApp:
         self.stop_signal = False
         self.uploaded_files = []
         self.lock = threading.Lock()
+        self.resume_content = ""
 
         # Initialize device list and names
         self.device_list = sd.query_devices()
@@ -331,18 +333,36 @@ class SpeechApp:
 
 
     def upload_file(self):
-        file_path = filedialog.askopenfilename(
-            filetypes=[("PDF files", "*.pdf"), ("Word documents", "*.docx"), ("Text files", "*.txt")])
-        if not file_path:
-            return
-
-        try:
+        file_path = filedialog.askopenfilename(filetypes=[("Word Document", "*.docx"), ("PDF", "*.pdf"), ("Text File", "*.txt")])
+        if file_path:
+            self.resume_content = self.read_file_content(file_path)
             file_name = os.path.basename(file_path)
-            self.uploaded_files.append((file_name, file_path))
-            self.file_list.insert("", "end", values=(file_name,))
+            self.uploaded_files.append(file_name)
+            messagebox.showinfo("File Uploaded", f"File '{file_name}' has been uploaded successfully.")
 
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to read file: {str(e)}")
+    def read_file_content(self, file_path):
+        _, file_extension = os.path.splitext(file_path)
+        if file_extension == '.docx':
+            return self.read_docx(file_path)
+        elif file_extension == '.pdf':
+            return self.read_pdf(file_path)
+        elif file_extension == '.txt':
+            return self.read_txt(file_path)
+        else:
+            raise ValueError("Unsupported file format")
+
+    def read_docx(self, file_path):
+        doc = docx.Document(file_path)
+        return "\n".join([para.text for para in doc.paragraphs])
+
+    def read_pdf(self, file_path):
+        with open(file_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            return "\n".join([page.extract_text() for page in reader.pages])
+
+    def read_txt(self, file_path):
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return file.read()
 
     def test_apis(self):
         try:
@@ -366,7 +386,7 @@ class SpeechApp:
 
             # Test OpenAI API by creating a simple completion request
             completion = client_openai.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="chatgpt-4o-latest",
                 messages=[{"role": "system", "content": "Test"}],
             )
 
@@ -392,11 +412,6 @@ class SpeechApp:
         self.transcript_display.delete(1.0, tk.END)
         self.chat_history = [{"role": "system", "content": "Context not set."}]
     
-    def get_resume_content(self):
-        for file_name, file_path in self.uploaded_files:
-            if "resume" in file_name.lower() or "cv" in file_name.lower():
-                return self.read_file_content(file_path)
-        return ""
     def is_behavioral_question(self, text):
         behavioral_patterns = [
             r"tell me about a time when",
@@ -410,18 +425,10 @@ class SpeechApp:
     def prepare_initial_context(self):
         context = self.context_input.get("1.0", tk.END).strip()
         job_context = self.job_input.get("1.0", tk.END).strip()
-        self.resume_content = self.get_resume_content()
 
-        # Prepare the initial system message with context and job description
         system_message = f"Job Context: {job_context}\nGeneral Context: {context}\n\n"
-        system_message += "Uploaded files:\n"
+        system_message += f"Resume Content:\n{self.resume_content}\n\n"
 
-        for file_name, file_path in self.uploaded_files:
-            system_message += f"- {file_name}\n"
-            file_content = self.read_file_content(file_path)
-            system_message += f"Content: {file_content[:500]}...\n\n"  # Include first 500 characters of each file
-
-        # Emphasize the structure for behavioral questions
         system_message += (
             "For behavioral questions, structure your response as follows:\n"
             "- **Situation**: Describe the situation or challenge.\n"
@@ -431,6 +438,7 @@ class SpeechApp:
         )
 
         return {"role": "system", "content": system_message}
+
     def prepare_behavioral_prompt(self, query):
         prompt = f"""
         Behavioral Question: {query}
@@ -454,19 +462,6 @@ class SpeechApp:
         """
         return prompt
     
-    def read_file_content(self, file_path):
-        if file_path.endswith(".txt"):
-            with open(file_path, 'r', encoding='utf-8') as file:
-                return file.read()
-        elif file_path.endswith(".docx"):
-            doc = docx.Document(file_path)
-            return "\n".join([para.text for para in doc.paragraphs])
-        elif file_path.endswith(".pdf"):
-            with open(file_path, 'rb') as file:
-                reader = PyPDF2.PdfReader(file)
-                return "\n".join([page.extract_text() for page in reader.pages])
-        return ""
-
     def stop_recording(self):
         self.stop_signal = True
         try:
@@ -539,46 +534,40 @@ class SpeechApp:
         return text.strip().endswith("?") or text.lower().startswith(tuple(question_words))
 
     def ask_gpt(self, query):
+        print(f"Asking GPT: {query}")
         max_retries = 3
         backoff_factor = 0.5
 
         for attempt in range(max_retries):
             try:
-                # Check if it's a behavioral question
                 if self.is_behavioral_question(query):
-                    # Prepare a special prompt for behavioral questions
                     behavioral_prompt = self.prepare_behavioral_prompt(query)
                     messages = [
                         {"role": "system", "content": self.initial_context["content"]},
                         {"role": "user", "content": behavioral_prompt}
                     ]
                 else:
-                    # Regular question handling
                     self.chat_history.append({"role": "user", "content": query})
                     messages = [self.initial_context] + self.chat_history[-5:]
 
                 response = client_openai.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=messages,
-                    max_tokens=500,  # Increased for more detailed responses
                     temperature=0.7,
-                    stop=None
+                    max_tokens=500
                 )
-
                 response_text = response.choices[0].message.content.strip()
                 self.chat_history.append({"role": "assistant", "content": response_text})
+                print(f"GPT response received, length: {len(response_text)}")
                 return response_text
 
-            except (openai.error.APIError, openai.error.ServiceUnavailableError, RequestException) as e:
+            except RequestException as e:
+                print(f"RequestException in ask_gpt (attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt == max_retries - 1:
-                    print(f"Error in GPT response after {max_retries} attempts: {e}")
                     return "I'm sorry, but I'm having trouble connecting right now. Please try again in a moment."
                 time.sleep(backoff_factor * (2 ** attempt))  # Exponential backoff
-            except openai.error.RateLimitError:
-                print("Rate limit exceeded. Please wait before trying again.")
-                return "I'm sorry, but I've reached my query limit. Please wait a moment before asking another question."
             except Exception as e:
-                print(f"Unexpected error: {e}")
+                print(f"Unexpected error in ask_gpt: {e}")
                 return "An unexpected error occurred. Please try again."
 
     def display_message(self, sender, message, tag):
@@ -586,52 +575,46 @@ class SpeechApp:
         self.transcript_display.insert(tk.END, f"[{timestamp}] ", "timestamp")
         self.transcript_display.insert(tk.END, f"{sender}: {message}\n", tag)
         self.transcript_display.see(tk.END)
+
     def process_gpt_response(self, query):
         try:
+            print(f"Processing GPT response for query: {query}")
             self.loading_label.config(text="Processing...")
+            self.root.update_idletasks()
             response_text = self.ask_gpt(query)
+            print(f"Received response from GPT: {response_text[:50]}...")  # Print first 50 chars of response
             self.display_message("Assistant", response_text, "assistant")
             self.speak_text(response_text)
         except Exception as e:
+            print(f"Error in GPT response: {str(e)}")
             messagebox.showerror("Error", f"Error in GPT response: {str(e)}")
         finally:
+            print("Resetting is_waiting_for_response flag")
             self.is_waiting_for_response = False
             self.loading_label.config(text="")
-
-    def process_gpt_response(self, query):
-        try:
-            # Get the response from GPT-3
-            response_text = self.ask_gpt(query)
-
-            # Display the assistant's response in the transcript display
-            self.transcript_display.insert(tk.END, f"Assistant: {response_text}\n", "assistant")
-            self.transcript_display.see(tk.END)
-
-            # Speak the response
-            self.speak_text(response_text)
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Error in GPT response: {str(e)}")
-
-        finally:
-            # Reset the waiting flag
-            self.is_waiting_for_response = False
+            self.root.update_idletasks()
 
     def speak_text(self, text):
+        self.root.after(0, lambda: self.speaking_indicator.config(foreground="red"))
         self.is_speaking = True
-        self.speaking_indicator.config(foreground="red")
-        tts = gTTS(text=text, lang='en')
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_mp3_file:
-            tts.save(temp_mp3_file.name)
-            temp_mp3_file_path = temp_mp3_file.name
+        
+        def speak_and_reset():
+            tts = gTTS(text=text, lang='en')
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_mp3_file:
+                tts.save(temp_mp3_file.name)
+                temp_mp3_file_path = temp_mp3_file.name
 
-        if os.name == 'posix':  # macOS/Linux
-            os.system(f"afplay {temp_mp3_file_path}")
-        elif os.name == 'nt':  # Windows
-            os.system(f"start {temp_mp3_file_path}")
+            if os.name == 'posix':  # macOS/Linux
+                os.system(f"afplay {temp_mp3_file_path}")
+            elif os.name == 'nt':  # Windows
+                os.system(f"start {temp_mp3_file_path}")
 
-        self.is_speaking = False
-        self.speaking_indicator.config(foreground="grey")
+            self.is_speaking = False
+            self.root.after(0, lambda: self.speaking_indicator.config(foreground="grey"))
+            print("Finished speaking, ready for next question")
+            self.is_waiting_for_response = False
+
+        threading.Thread(target=speak_and_reset, daemon=True).start()
 
 # Run the application
 if __name__ == "__main__":
