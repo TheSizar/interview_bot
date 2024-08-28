@@ -335,10 +335,22 @@ class SpeechApp:
     def upload_file(self):
         file_path = filedialog.askopenfilename(filetypes=[("Word Document", "*.docx"), ("PDF", "*.pdf"), ("Text File", "*.txt")])
         if file_path:
+            threading.Thread(target=self.process_file, args=(file_path,), daemon=True).start()
+
+    def process_file(self, file_path):
+        try:
             self.resume_content = self.read_file_content(file_path)
             file_name = os.path.basename(file_path)
             self.uploaded_files.append(file_name)
-            messagebox.showinfo("File Uploaded", f"File '{file_name}' has been uploaded successfully.")
+            self.root.after(0, self.update_file_list)
+            self.root.after(0, lambda: messagebox.showinfo("File Uploaded", f"File '{file_name}' has been uploaded successfully."))
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Upload Error", f"Failed to upload file: {str(e)}"))
+
+    def update_file_list(self):
+        self.file_list.delete(*self.file_list.get_children())
+        for file in self.uploaded_files:
+            self.file_list.insert("", "end", values=(file,))
 
     def read_file_content(self, file_path):
         _, file_extension = os.path.splitext(file_path)
@@ -358,7 +370,7 @@ class SpeechApp:
     def read_pdf(self, file_path):
         with open(file_path, 'rb') as file:
             reader = PyPDF2.PdfReader(file)
-            return "\n".join([page.extract_text() for page in reader.pages])
+            return "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
 
     def read_txt(self, file_path):
         with open(file_path, 'r', encoding='utf-8') as file:
