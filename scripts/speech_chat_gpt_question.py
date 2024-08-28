@@ -22,6 +22,8 @@ import time
 from requests.exceptions import RequestException
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import queue
+import chardet
 
 # Get the directory of the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -55,6 +57,10 @@ os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_file_path
 # Initialize Google Speech-to-Text client and queue
 client_speech = speech.SpeechClient()
 audio_queue = queue.Queue()
+
+# Suppress ALTS warning
+os.environ['GRPC_TRACE'] = 'none'
+os.environ['GRPC_VERBOSITY'] = 'none'
 
 class AudioLevelMeter(tk.Canvas):
     def __init__(self, master, device_index, **kwargs):
@@ -333,19 +339,30 @@ class SpeechApp:
 
 
     def upload_file(self):
-        file_path = filedialog.askopenfilename(filetypes=[("Word Document", "*.docx"), ("PDF", "*.pdf"), ("Text File", "*.txt")])
+        file_path = filedialog.askopenfilename(filetypes=[("All Files", "*.*")])
         if file_path:
+            self.loading_label.config(text="Uploading file...")
+            self.root.update_idletasks()
             threading.Thread(target=self.process_file, args=(file_path,), daemon=True).start()
 
     def process_file(self, file_path):
         try:
+            print(f"Starting to process file: {file_path}")
             self.resume_content = self.read_file_content(file_path)
+            if not self.resume_content:
+                raise ValueError("No content could be extracted from the file.")
+            print(f"File content read successfully")
             file_name = os.path.basename(file_path)
             self.uploaded_files.append(file_name)
+            print(f"File {file_name} added to uploaded_files list")
             self.root.after(0, self.update_file_list)
+            self.root.after(0, lambda: self.loading_label.config(text=""))
             self.root.after(0, lambda: messagebox.showinfo("File Uploaded", f"File '{file_name}' has been uploaded successfully."))
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Upload Error", f"Failed to upload file: {str(e)}"))
+            print(f"Error processing file: {str(e)}")
+            error_message = str(e)
+            self.root.after(0, lambda: self.loading_label.config(text=""))
+            self.root.after(0, lambda: messagebox.showerror("Upload Error", f"Failed to upload file: {error_message}"))
 
     def update_file_list(self):
         self.file_list.delete(*self.file_list.get_children())
@@ -353,28 +370,20 @@ class SpeechApp:
             self.file_list.insert("", "end", values=(file,))
 
     def read_file_content(self, file_path):
-        _, file_extension = os.path.splitext(file_path)
-        if file_extension == '.docx':
-            return self.read_docx(file_path)
-        elif file_extension == '.pdf':
-            return self.read_pdf(file_path)
-        elif file_extension == '.txt':
-            return self.read_txt(file_path)
-        else:
-            raise ValueError("Unsupported file format")
+        try:
+            # Detect the file encoding
+            with open(file_path, 'rb') as file:
+                raw_data = file.read()
+                result = chardet.detect(raw_data)
+                encoding = result['encoding']
 
-    def read_docx(self, file_path):
-        doc = docx.Document(file_path)
-        return "\n".join([para.text for para in doc.paragraphs])
-
-    def read_pdf(self, file_path):
-        with open(file_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-            return "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-
-    def read_txt(self, file_path):
-        with open(file_path, 'r', encoding='utf-8') as file:
-            return file.read()
+            # Read the file content using the detected encoding
+            with open(file_path, 'r', encoding=encoding) as file:
+                content = file.read()
+            return content
+        except Exception as e:
+            print(f"Error reading file: {str(e)}")
+            return f"Unable to read file content. Error: {str(e)}"
 
     def test_apis(self):
         try:
@@ -438,42 +447,78 @@ class SpeechApp:
         context = self.context_input.get("1.0", tk.END).strip()
         job_context = self.job_input.get("1.0", tk.END).strip()
 
-        system_message = f"Job Context: {job_context}\nGeneral Context: {context}\n\n"
-        system_message += f"Resume Content:\n{self.resume_content}\n\n"
+        # Extract key information from resume
+        key_projects = self.extract_key_projects(self.resume_content)
+        key_skills = self.extract_key_skills(self.resume_content)
 
-        system_message += (
-            "For behavioral questions, structure your response as follows:\n"
-            "- **Situation**: Describe the situation or challenge.\n"
-            "- **Task**: Explain what needed to be done.\n"
-            "- **Action**: Detail the actions taken.\n"
-            "- **Result**: Highlight the outcomes or achievements."
+        system_message = (
+            f"You are embodying the person described in the following resume. Answer all questions in the first person, "
+            f"using 'I' statements. Always use bullet points in your responses. Here's your background:\n\n"
+            f"Resume Content:\n{self.resume_content}\n\n"
+            f"Key Projects:\n{key_projects}\n\n"
+            f"Key Skills:\n{key_skills}\n\n"
+            f"Job Description:\n{job_context}\n\n"
+            f"General Context: {context}\n\n"
+            f"When answering questions:\n"
+            f"1. Always use bullet points for each main point or reason.\n"
+            f"2. Draw specific examples from the key projects and skills listed.\n"
+            f"3. Relate your answers to the job description whenever possible.\n"
+            f"4. For behavioral questions, use the STAR method (Situation, Task, Action, Result) in bullet point format.\n"
+            f"5. Be concise but detailed, aiming for 3-5 bullet points per answer.\n"
         )
 
         return {"role": "system", "content": system_message}
 
+    def extract_key_projects(self, resume_content):
+        # This is a simple extraction method. You might need to adjust based on your resume format
+        projects = re.findall(r'Project:.*?(?=Project:|$)', resume_content, re.DOTALL)
+        return "\n".join([f"• {project.strip()}" for project in projects])
+
+    def extract_key_skills(self, resume_content):
+        # This is a simple extraction method. You might need to adjust based on your resume format
+        skills_section = re.search(r'Skills:.*', resume_content, re.DOTALL)
+        if skills_section:
+            skills = skills_section.group().split(':')[1].split(',')
+            return "\n".join([f"• {skill.strip()}" for skill in skills])
+        return ""
+
     def prepare_behavioral_prompt(self, query):
         prompt = f"""
-        Behavioral Question: {query}
+        As the person described in the resume, answer this behavioral question: {query}
 
-        Resume Content:
-        {self.resume_content}
+        Use the STAR method (Situation, Task, Action, Result) to structure your response. 
+        Draw from one of your key projects or experiences listed in your resume.
 
-        Based on the provided resume and the context of this person's experience, prepare a model answer for the behavioral question. The answer should:
-        1. Be anchored in the specific experiences mentioned in the resume
-        2. Follow the STAR (Situation, Task, Action, Result) format
-        3. Be detailed and specific, using concrete examples from the person's background
-        4. Be approximately 250-300 words long
+        Your response should follow this structure, using bullet points:
+        • Situation:
+          - Briefly describe the context
+        • Task:
+          - Explain what you needed to do
+        • Action:
+          - Detail the steps you took (use sub-bullets if necessary)
+        • Result:
+          - Highlight the outcome
+          - Mention what you learned or how it relates to the job you're applying for
 
-        Please structure the response as follows:
-        - Situation: [Brief description of the context]
-        - Task: [What needed to be done]
-        - Action: [Steps taken to address the situation]
-        - Result: [Outcome and lessons learned]
-
-        Provide a well-crafted response that showcases the individual's skills and experiences relevant to the question.
+        Ensure your answer is specific, drawing directly from your resume, and relates to the job description.
+        Begin your response now, speaking as yourself based on your resume.
         """
         return prompt
-    
+
+    def prepare_general_prompt(self, query):
+        prompt = f"""
+        As the person described in the resume, answer this question: {query}
+
+        Remember to:
+        • Use bullet points for each main point or reason
+        • Draw specific examples from your key projects and skills
+        • Relate your answer to the job description when relevant
+        • Be concise but detailed, aiming for 3-5 main bullet points
+
+        Begin your response now, speaking as yourself based on your resume and the job description.
+        """
+        return prompt
+
     def stop_recording(self):
         self.stop_signal = True
         try:
@@ -553,14 +598,14 @@ class SpeechApp:
         for attempt in range(max_retries):
             try:
                 if self.is_behavioral_question(query):
-                    behavioral_prompt = self.prepare_behavioral_prompt(query)
-                    messages = [
-                        {"role": "system", "content": self.initial_context["content"]},
-                        {"role": "user", "content": behavioral_prompt}
-                    ]
+                    prompt = self.prepare_behavioral_prompt(query)
                 else:
-                    self.chat_history.append({"role": "user", "content": query})
-                    messages = [self.initial_context] + self.chat_history[-5:]
+                    prompt = self.prepare_general_prompt(query)
+
+                messages = [
+                    self.initial_context,
+                    {"role": "user", "content": prompt}
+                ]
 
                 response = client_openai.chat.completions.create(
                     model="gpt-3.5-turbo",
